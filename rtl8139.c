@@ -5,16 +5,28 @@
 #include <linux/etherdevice.h>
 #include <linux/kernel.h>
 #include <linux/io.h>
+#include <linux/interrupt.h>
+#include <linux/types.h>
+
+#include "rtl_register.h"
 
 #define REALTEK_VENDER_ID  0x10EC
 #define REALTEK_DEVICE_ID   0x8139
 #define DRIVER "rtl8139"
+#define NUM_TX_DESC 4
+
 static struct net_device *rtl8139_dev;
 
 struct rtl8139_priv {
 	struct pci_dev *pci_dev; /*PCI device */
 	void *mmio_addr;  /*memory mapped I/O addr */
 	unsigned long regs_len; /* length of I/O or MMI/O region */
+	unsigned int tx_flag;  /*tx_flag shall contain transmission flags to notify the device*/
+	unsigned int cur_tx;  /*cur_tx shall hold current transmission descriptor*/
+	unsigned int dirty_tx; /*dirty_tx denotes the first of transmission descriptors which have not completed transmission.*/
+	unsigned char *tx_buf[NUM_TX_DESC];   /* Tx bounce buffers */
+	unsigned char *tx_bufs;               /* Tx bounce buffer region. */
+	dma_addr_t tx_bufs_dma;
 };
 static struct pci_dev *rtl8139_probe(void){
 	struct pci_dev *pdev=NULL;
@@ -56,9 +68,71 @@ static int rtl8139_init(struct pci_dev *pdev, struct net_device **dev_out){
 	*dev_out=ndev;
 	return 0;
 }	
+static void rtl8139_interrupt(int irq, void *dev_instance, struct pt_regs *regs){
+}
+static void rtl8139_chip_reset (void *ioaddr){
+	int i;
+	/* Soft reset the chip. */
+	writeb(CmdReset, ioaddr + CR);
+	 /* Check that the chip has finished the reset. */
+	/*the memory barrier is needed to ensure that the reset happen in the expected order.*/
+	for(i=1000;i>0;i--){
+		barrier();
+		if((readb(ioaddr + CR) & CmdReset) == 0) break;
+		udelay (10);
+	}
+
+}
+
+static void rtl8139_init_ring(struct net_device *dev){
+	struct rtl8139_priv *priv=netdev_priv(dev);
+	int i;
+	priv->cur_tx = 0;
+	priv->dirty_tx = 0;
+	for(i=0;i<NUM_TX_DESC;i++)
+		priv->tx_buf[i]= &priv->tx_bufs[i * TX_BUF_SIZE];
+	return; 
+}
+static void rtl8139_hw_start (struct net_device *dev) {
+	struct rtl8139_priv *priv=netdev_priv(dev);
+	void *ioaddr=priv->mmio_addr;
+	u32 i;
+	rtl8139_chip_reset(ioaddr);
+	/* Must enable Tx before setting transfer thresholds! */
+	 writeb(CmdTxEnb, ioaddr + CR);
+	 /* tx config */
+	writel(0x00000600, ioaddr + TCR); /* DMA burst size 1024 */
+	/* init Tx buffer DMA addresses */
+	for(i=0;i<NUM_TX_DESC;i++)
+		writel(priv->tx_bufs_dma+(priv->tx_buf[i]- priv->tx_bufs),ioaddr + TSAD0 + (i*4));
+	/* Enable all known interrupts by setting the interrupt mask. */
+	writel(INT_MASK,ioaddr + IMR);
+	netif_start_queue (dev); // allow transmit
+	return;
+}
 
 static int rtl8139_open(struct net_device *dev){
-	pr_info("rtl8139 Device opened\n");
+	int retval;
+	struct rtl8139_priv *tc=netdev_priv(dev);	
+	/* get the IRQ
+    	* second arg is interrupt handler
+    	* third is flags, 0 means no IRQ sharing  requesting function is either 0 to indicate success */
+	retval=request_irq(dev->irq,(irq_handler_t)rtl8139_interrupt,0,dev->name,dev);
+	if(retval)
+		return retval;
+	/* get memory for Tx buffers
+	 * memory must be DMAable  */
+	/*
+	 * To allocate and map large (PAGE_SIZE or so) consistent DMA regions,
+	 * you should do: dma_addr_t dma_handle; cpu_addr = pci_alloc_consistent(dev, size, &dma_handle);*/
+	tc->tx_bufs=pci_alloc_consistent(tc->pci_dev,TOTAL_TX_BUF_SIZE,&tc->tx_bufs_dma);
+	if(!tc->tx_bufs){
+		free_irq(dev->irq, dev);
+		return -ENOMEM;
+	}
+	tc->tx_flag=0;
+	rtl8139_init_ring(dev);
+	rtl8139_hw_start(dev);
 	return 0;
 }
 
@@ -68,7 +142,25 @@ static int rtl8139_stop(struct net_device *dev){
 }
 
 static int rtl8139_start_xmit(struct sk_buff *skb,struct net_device *dev){
-	pr_info("rtl8139_start_xmit is called\n");
+	struct rtl8139_priv *priv=netdev_priv(dev);
+	void *ioaddr = priv->mmio_addr;
+	unsigned int entry = priv->cur_tx;
+	unsigned int len = skb->len;
+	if (len < TX_BUF_SIZE) {
+		if(len<ETH_MIN_LEN) memset(priv->tx_buf[entry],0,ETH_MIN_LEN);
+		skb_copy_and_csum_dev(skb,priv->tx_buf[entry]); // which copies the packet contents to the DMA capable memory.
+		dev_kfree_skb(skb);
+	}
+	else{
+		dev_kfree_skb(skb);
+		return 0;
+	}
+	writel(priv->tx_flag|max(len, (unsigned int)ETH_MIN_LEN),ioaddr + TSD0 + (entry *sizeof (u32)));
+	entry++;
+	priv->cur_tx = entry % NUM_TX_DESC;
+	if (priv->cur_tx == priv->dirty_tx){
+		netif_stop_queue(dev);
+	}
 	return 0;
 }
 
