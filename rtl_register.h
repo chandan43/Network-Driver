@@ -1,19 +1,27 @@
 #define TX_BUF_SIZE  1536  /* should be at least MTU + 14 + 4 */
-#define NUM_TX_SIZE 10
+#define NUM_TX_SIZE 4
 #define TOTAL_TX_BUF_SIZE  (TX_BUF_SIZE * NUM_TX_SIZE)
 #define ETH_MIN_LEN 60  /* minimum Ethernet frame size */
+
+#define RX_BUF_LEN_IDX 2         /* 0==8K, 1==16K, 2==32K, 3==64K */
+#define RX_BUF_LEN     (8192 << RX_BUF_LEN_IDX)
+#define RX_BUF_PAD     16           /* see 11th and 12th bit of RCR: 0x44 */
+#define RX_BUF_WRAP_PAD 2048   	/* spare padding to handle pkt wrap */
+#define RX_BUF_TOT_LEN  (RX_BUF_LEN + RX_BUF_PAD + RX_BUF_WRAP_PAD)
+
+
 /* 8139 register offsets */
 #define TSD0      0x10   // TxStatus
 #define TSAD0     0x20   // TxAddr
 #define RBSTART   0x30   // RxBuf 
 #define CR        0x37   // ChipCmd
 #define CAPR      0x38   // RxBufPtr 
-#define IMR       0x3c   // IntrMask  
-#define ISR       0x3e   // IntrStatus
+#define IMR       0x3C   // IntrMask  
+#define ISR       0x3E   // IntrStatus
 #define TCR       0x40   // TxConfig 
 #define RCR       0x44   // RxConfig
-#define MPC       0x4c   // RxMissed
-#define MULINT    0x5c   // MultiIntr
+#define MPC       0x4C   // RxMissed
+#define MULINT    0x5C   // MultiIntr
 
 /* TSD register commands */
 #define TxHostOwns    0x2000 // 
